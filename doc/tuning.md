@@ -42,9 +42,22 @@ However, running containers on hosts without an orchestrator, suffers from some 
 * A great level of attention is required when adding new workload, to make sure the host will have enough capacity
 * Conservative choices in (or lack of) capacity planning will lead to inefficient resource usage
 
-Essentially, we would need containers to tell how much resources they wish, or in other terms how much they request.
+Essentially, we would need containers to tell how much resources they wish, if we wanted to solve some of these above issues.
 
 # Running workload in Kubernetes
+
+One of the fundamental goal of Kubernetes is to be able to place workload dynamically, while preserving efficiency on resource usage (i.e. avoid wasting available resources). As we have seen, dynamic placement is only possible if a given workload is providing information about its resource usage. Kubernetes introduces `request` as a mean to express what the workload needs. It is an information that is used by the Kubernetes scheduler when a new pod needs to be assigned to a worker. Once the pod is assigned, the request does not play a role anymore (except in one case discussed later). This contrasts with the `limit`, which is not used for placement (TODO except for the feature that tries to find a node that can currently accomodate the pod's limit), but is used by the container runtime level to configure cgroup quotas.
+
+In other words:
+
+* `request`: used by the Kubernetes scheduler for placement
+* `limit`: used by the container runtime engine for enforcement
+
+It is easy to understand that requests are not guaranteed - on only limits are. Let's assume a worker node with just 1 core and 3 pods already running. All pods have a 250 millicores request and a 500 millicores limit. Kubernetes may schedule a forth pod on the same node, even if the 3 existing pods were all consuming each 333 millicores, well above their request. Actual cpu availability would be determined by the CFS and the behavior of the other processes running on the same node.
+
+The next observation we can make is that resource availability is dependent on all processes defining appropriate requests. In the above example, if all 3 existing pods were running at 333 millicores most of the time, and they had requested 333 instead of 250 millicores, the forth pod would have never been scheduled on that same host, leaving it to battle with the CFS to grab the 250 it requires. It is not enough for a particular process to define appropriate values, all workloads need to play nice. Under-evaluating requests, will lead to poor placement decisions, and resource availability lower than requested. Conversely, Over-evaluating requests (setting requests above actual usage) will lead to under-scheduled nodes and low resource efficiency.
+
+# Kubenetes Quality of Service Classes (QoS)
 
 
 
@@ -55,3 +68,7 @@ Essentially, we would need containers to tell how much resources they wish, or i
 
 [Performance Best Practices for
 Kubernetes with VMware Tanzu](https://www.vmware.com/content/dam/digitalmarketing/vmware/en/pdf/techpaper/performance/vsphere-tanzu-kubernetes-perf.pdf)
+
+[Understanding Linux Container Scheduling](https://engineering.squarespace.com/blog/2017/understanding-linux-container-scheduling)
+
+[Everything you Need to Know about Kubernetes Quality of Service (QoS) Classes](https://www.replex.io/blog/everything-you-need-to-know-about-kubernetes-quality-of-service-qos-classes)
