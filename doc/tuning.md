@@ -31,24 +31,89 @@ Still, overcommitting at the virtualization layer should be an implementation de
 
 # Running workload in containers
 
-Compared to workload running on VMs, containers offer the added option of configuring a resource limit (option `-m` in docker for memory and `--cpus` for cpu). The primary benefit, is that we can guarantee that workloads will not go above the configured limits. This is essentially a protection for the other workloads running on the same host. If the host was configured to match the sum of the resource limits of all containers, this will guarantee that each container will be able to use al resources, at any time, up to the limits it configured. But this comes with a steep price: if containers are not running steadily near their limits, those resources will be wasted (unless the host is a VM, and overcommitting is used efficiently, with the limitations it has, as we have seen). This could be an option if resources need to be guaranteed and the associated inefficiencies are balanced by business opportunities, or if the workloads have all a stable resource consumption. But often this will not be the case. As a result, the host will be configured to hosts a bundle of containers, whose resource limit sum is greater than the host capacity; doing at the process level the same overcommitting that virtualization clusters do at the VM level.
+Compared to workload running on VMs, containers offer the added option of configuring a resource limit (option `-m` in docker for memory and `--cpus`, `--cpu-period`, `--cpu-quota` and `--cpu-shares` for cpu).
 
-Still, this is a huge improvement compared to running workload directly on VMs:
+The `-m` memory parameter is a limit that the container cannot go over. Since memory is not a compressible resource, if the container tries to go over, it will go OOM and get killed.
 
-* There is a protection against a faulty process attempting to grab all the host's resources
-* The host capacity is easier to assess, because we can reason in terms of overcommitting ratio (e.g. sum of container limits divided by the host capacity), much like VMs resources compared to the physical host capacity.
+The cpu shares defines a proportional weight for host cpu access, relative to the other containers. The default value in docker is 1024, but it is important to note that this is equal to a number of millicores. Let's take an example to illustrate:
 
-However, running containers on hosts without an orchestrator, suffers from some of the limitations discussed previously:
+Start launching `docker stats` to observe resource consumption:
+```
+docker stats --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"
+```
 
-* Workload cannot be moved easily
-* A great level of attention is required when adding new workload, to make sure the host will have enough capacity
-* Conservative choices in (or lack of) capacity planning will lead to inefficient resource usage
+Assuming a docker host with 2 cores, let's launch a stress test that will consume all 2 cores for 60 seconds:
+```
+docker run -it --rm alexeiled/stress-ng --cpu 2 --timeout 60s --metrics-brief
+```
 
-Essentially, we would need containers to tell how much resources they wish, if we wanted to solve some of these above issues.
+While executing, the stats show:
+```
+NAME                CPU %               MEM USAGE / LIMIT     MEM %
+sleepy_torvalds     202.42%             7.059MiB / 7.776GiB   0.09%
+```
+
+Now let's run the same container with a cpu shares of `300` and another container with `100`:
+```
+docker run -it --rm -d --cpu-shares=100 --name=container_100 alexeiled/stress-ng --cpu 2 --timeout 60s --metrics-brief
+docker run -it --rm -d --cpu-shares=300 --name=container_300 alexeiled/stress-ng --cpu 2 --timeout 60s --metrics-brief
+```
+
+We can see that the `100` container is using 25% of the total capacity (i.e. `100/400`), and the other container uses the other `75%`:
+```
+NAME                CPU %               MEM USAGE / LIMIT     MEM %
+container_100       51.39%              7.039MiB / 7.776GiB   0.09%
+container_300       152.03%             7.09MiB / 7.776GiB    0.09%
+```
+
+Without waiting for the 2 containers to stop, launch a third container with cpus shares equal to `400`:
+```
+docker run -it --rm -d --cpu-shares=400 --name=container_400 alexeiled/stress-ng --cpu 2 --timeout 60s --metrics-brief
+```
+
+
+We can see that the 2 first containers were readjusted to consume a fraction of the total number of shares defined on all containers:
+- `100/800: 12.5% of total capacity (i.e. 2 cores)`
+- `300/800: 37.5%`
+- `400/800: 50%`
+
+```
+NAME                CPU %               MEM USAGE / LIMIT     MEM %
+container_100       24.78%              7.02MiB / 7.776GiB    0.09%
+container_300       72.62%              7.008MiB / 7.776GiB   0.09%
+container_400       96.21%              7.027MiB / 7.776GiB   0.09%
+```
+
+The results would have been the same if shares had been `1000`, `3000` and `4000`, instead of `100`, `300`, and `400`. So whatever the values may be, they need to be consistent with one another.
+
+Cpu shares are used may the system has contention (i.e. processes ask for more than the total capacity). Without contention, processes are free to use the entire host capacity. As a result cpu shares cannot be used to limit access to cpu, but only to guarantee some access to it. Recognizing this as an issue, Paul Turner, Bharata B. Rao and Nikhil Rao introduced the _CPU bandwidth control for CFS_ in the 2010 Linux Symposium, as a mean to limit access to cpu for processes: cpu quota and cpu period.
+
+The cpu period is by default 100000 microseconds (i.e. 100 ms) defines the cpu period. The cpu quota defines the number of microseconds per cpu periods that the container is limited to. In docker, `--cpu-period="100000" --cpu-quota="150000"` means that the process is limited to `1.5` cpus, which can be expressed more conveniently with `--cpus="1.5"` in docker `1.13`.
+
+Run again the first container with the `--cpus` option:
+```
+docker run -it --rm --cpus=1.5  alexeiled/stress-ng --cpu 2 --timeout 20s --metrics-brief
+```
+
+You can see that the container is being imited to 75% of the 2 cores total capacity:
+```
+NAME                CPU %               MEM USAGE / LIMIT     MEM %
+brave_mayer         154.90%             6.988MiB / 7.776GiB   0.09%
+```
+
+As we can see, the container runtime engine provides options to a guarantee (through the cpu shares) and limit (through the cpu quota) access to cpu. Guaranteed access does not mean that cpu cycles will go wasted however if not used. If a container reserves 1 core, but stay idle, those cpu cycles will go to a shared pool, and get distributed to whoever needs them by the CFS.
+
+These mechanisms offer a huge improvement compared to running workload on VMs, as now it is possible to tune access to resources. They can be used to define lower and upper bounds for cpu usage, and help with different scenarios:
+
+- provide dedicated resources, and limit the process to the resources
+- provide a minimal amount of guaranteed resources, and define an upper bound allowing the process to go above the minimal amount
+- provide no minimal amount, and define an upper bound
+
+This provides a lot of flexibility. However, running static containers on hosts, can be tedious (e.g. translating cpu shares into millicores) and workload cannot be moved easily. For that reason, the industry has started working on container orchestrators, to allow running containers at scale, while allowing resource efficiency, and ease of resource configuration for the individual workloads.
 
 # Running workload in Kubernetes
 
-One of the fundamental goal of Kubernetes is to be able to place workload dynamically, while preserving efficiency on resource usage (i.e. avoid wasting available resources). As we have seen, dynamic placement is only possible if a given workload is providing information about its resource usage. Kubernetes introduces `request` as a mean to express what the workload needs. It is an information that is used by the Kubernetes scheduler when a new pod needs to be assigned to a worker. Once the pod is assigned, the request does not play a role anymore (except in one case discussed later). This contrasts with the `limit`, which is not used for placement (TODO except for the feature that tries to find a node that can currently accomodate the pod's limit), but is used by the container runtime level to configure cgroup quotas.
+One of the fundamental goal of Kubernetes is to be able to place workload dynamically, while preserving efficiency on resource usage (i.e. avoid wasting available resources). As we have seen, dynamic placement is only possible if a given workload is providing information about its resource usage. Kubernetes introduces `request` as a mean to express what the workload needs. It is an information that is used by the Kubernetes scheduler when a new pod needs to be assigned to a worker. Once the pod is assigned, . This contrasts with the `limit`, which is not used for placement (TODO except for the feature that tries to find a node that can currently accomodate the pod's limit), but is used by the container runtime level to configure cgroup quotas.
 
 In other words:
 
@@ -162,3 +227,5 @@ Kubernetes with VMware Tanzu](https://www.vmware.com/content/dam/digitalmarketin
 [Node-pressure Eviction](https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/)
 
 [Understanding container CPU requests](https://docs.openshift.com/container-platform/4.7/nodes/clusters/nodes-cluster-overcommit.html#understanding-container-CPU-requests_nodes-cluster-overcommit)
+
+[Docker cpu resource limits](https://nodramadevops.com/2019/10/docker-cpu-resource-limits/)
