@@ -105,9 +105,9 @@ As we can see, the container runtime engine provides options to a guarantee (thr
 
 These mechanisms offer a huge improvement compared to running workload on VMs, as now it is possible to tune access to resources. They can be used to define lower and upper bounds for cpu usage, and help with different scenarios:
 
-- provide dedicated resources, and limit the process to the resources
-- provide a minimal amount of guaranteed resources, and define an upper bound allowing the process to go above the minimal amount
-- provide no minimal amount, and define an upper bound
+* provide dedicated resources, and limit the process to the resources
+* provide a minimal amount of guaranteed resources, and define an upper bound allowing the process to go above the minimal amount
+* provide no minimal amount, and define an upper bound
 
 This provides a lot of flexibility. However, running static containers on hosts, can be tedious (e.g. translating cpu shares into millicores) and workload cannot be moved easily. For that reason, the industry has started working on container orchestrators, to allow running containers at scale, while allowing resource efficiency, and ease of resource configuration for the individual workloads.
 
@@ -117,14 +117,66 @@ One of the fundamental goal of Kubernetes is to be able to place workload dynami
 
 In other words:
 
-* `request`: used by the Kubernetes scheduler for placement
-* `limit`: used by the container runtime engine for enforcement
+* `request`: the minimum amount of resource made available to the container
+* `limit`: the maximum amount of resource made available to the container
 
-It is easy to understand that requests are not guaranteed - on only limits are. Let's assume a worker node with just 1 core and 3 pods already running. All pods have a 250 millicores request and a 500 millicores limit. Kubernetes may schedule a forth pod on the same node, even if the 3 existing pods were all consuming each 333 millicores, well above their request. Actual cpu availability would be determined by the CFS and the behavior of the other processes running on the same node.
+As we have seen previously, at the linux kerne level, there are only 2 mechanisms:
 
-The next observation we can make is that resource availability is dependent on all processes defining appropriate requests, not just one good citizen. In the above example, if all 3 existing pods were running at 333 millicores most of the time, and they had requested 333 instead of 250 millicores, the forth pod would have never been scheduled on that same host, leaving it to battle with the CFS to grab the 250 it requires. It is not enough for a particular process to define appropriate values, all workloads need to play nice:
+* cpu shares to guarantee a relative distribution of cpu cycles
+* cpu quota to throttle access to resources above a certain threshold
 
-* Under-evaluating requests, will lead to poor placement decisions, and resource availability lower than requested.
+There is actually a direct relationship between the Kubernetes request and limit, and the underlying linux features. Let's take this pod for instance:
+
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello
+spec:
+  containers:
+  - name: hello
+    image: alexeiled/stress-ng
+    args: ['--cpu', '1', '--timeout', '60s']
+    resources:
+      requests:
+        cpu: "0.3"
+      limits:
+        cpu: "0.7"
+```
+
+We can display the associated shares and quota that have been defined on the container:
+```
+$ docker inspect 848589738a9f --format 'shares={{.HostConfig.CpuShares}} quota={{.HostConfig.CpuQuota}} period={{.HostConfig.CpuPeriod}}'
+shares=307 quota=70000 period=100000
+```
+
+The shares is calculated using: `0.3 * 1024`. This is the reason why the shares is `307` and not `300`.
+The quota is calculated using: `0.7 * 100000`.
+
+If requests are not set, then they are automatically set to the limit itself. So in the above example we would have: `shares=716 quota=70000`.
+
+If the cfs cpu quota is a straightforward translation of the kubernetes limit, there is a mismatch in semantic between the cfs cpu share and the kubernetes request. The former is a relative weight, whereas the later is an absolute quantity of a physical resource. There are 2 consequences:
+
+* The container gets more guaranteed resources than it thinks
+* The container are not treated equally with respect to allocation when they go above their request
+
+Let's take a 2 cores hosts running 1 container with 300 millicores request, and another one with 600 millicores. As we have seen they will respectively get 307 (1/3 of total shares) and 614 (2/3 of total shares) shares. If some contention arises, the firt container will be guaranteed 1/3 of 2 cores: 667 millicores. The 2nd one will receive 1333 millicores, far more than what was requested. As the host is filling up with containers, the requests and the shares will look more and more alike. Let's say we are running a 3rd container with 1100 millicores request, filling up our 2-cores host. Then the shares for the 3 containers will be `307/614/1126` for a total of `2047` shares, and the guaranteed amount of cpu will be `300/600/1100`.
+
+The kubernetes request gives the false impression that this represents a lower bound, and after that all containers are treated equally. As we have seen, allocation is driven by the number of shares given to the container. In the first example where we have 2 containers with `300` and `600` shares respectively, 2 cpu cycles will be offered to the 2nd container if needed, when only one will be dedicated to the first one. If the 2nd container does not get limited, the first one will only be able to grab an additional 367 millicores on top of the 300 requested (33% of the remaining 1100), when the 2nd one will be able to grab 733 on top of the 600 requested (67% of the remaining 1100). We can see that the ratios `1/3` and `2/3` are respected above the configured requests.
+
+A direct consequence is that containers with large requests, will tend to be privileged over low request containers when contention arises. Take one application deployed 2 times in 2 different pods on the same 2-cores host. If the first pod is configured with 300 request, and the other one 600, the second instance of the application will be largely privileged over the first one during peaks. If the first team has done a good job at tuning the application when coming up with a 300 request, and the other team has done a loosy job on the 600, the loosy team will be favored over the serious one.
+
+It is worth noting that limits are a way to reintroduce some fairness in the distribution of cpu cycles. In the prevous example, if the containers had been run with a limit of 1 core, then both containers would burst up to 500 and 1000 millicores. At that point container 2 would get throttled, and container 1 would be free to grab the remaining 500, ending up with both consuming 1000 millicores in the end.
+
+As a result, it is recommended to:
+
+* Install a culture of sizing requests and limits appropriately in all teams.
+* Monitor those settings and retrofit more appropriate settings regularly (monthly, or ideally weekly).
+* Generalize the use of limits to introduce some fairness in the way the host capacity is distributed among the different processes.
+
+It is important to understand that Resourcer availability is dependent on all processes defining appropriate requests, not just one good citizen. It is not enough for a particular process to define appropriate values, all workloads need to play nice:
+
+* Under-evaluating requests, will lead to poor placement decisions, and resource availability lower than requested, plus non fair access to the extra capacity, which will distributed to high requestor in a proportional manner during bursts.
 * Over-evaluating requests (setting requests above actual usage) will lead to under-scheduled nodes and low resource efficiency.
 
 # Kubernetes Quality of Service Classes (QoS)
@@ -229,3 +281,7 @@ Kubernetes with VMware Tanzu](https://www.vmware.com/content/dam/digitalmarketin
 [Understanding container CPU requests](https://docs.openshift.com/container-platform/4.7/nodes/clusters/nodes-cluster-overcommit.html#understanding-container-CPU-requests_nodes-cluster-overcommit)
 
 [Docker cpu resource limits](https://nodramadevops.com/2019/10/docker-cpu-resource-limits/)
+
+[How Pods with resource limits are run](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#how-pods-with-resource-limits-are-run)
+
+[Running Kubernetes and the dashboard with Docker Desktop](https://andrewlock.net/running-kubernetes-and-the-dashboard-with-docker-desktop/)
