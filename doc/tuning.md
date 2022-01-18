@@ -1,5 +1,13 @@
 This article aims providing a good understanding of container resource sizing in kubernetes, including (but not limited to) workloads that exhibit a resource spike at startup (such as SpringBoot).
 
+This is a "Work in Progress". Important topics have yet to be covered, such as:
+
+* Recommendation engines
+** [Vertical Pod Autoscaler (VPA)](https://github.com/kubernetes/autoscaler/tree/master/vertical-pod-autoscaler)
+** [Harness](https://docs.harness.io/article/ikxjmkqi03-recommendations)
+* [Memory swap](https://kubernetes.io/blog/2021/08/09/run-nodes-with-swap-alpha/) in Kubernetes 1.22
+* Scaling out: How to mix Horizontal Pod Autoscaling with VPA
+
 # From bare metal to virtualization
 
 Running multiple workloads on bare metal requires to share resources between the different processes on a given host. Processes are not protected against each other (for CPU, it depends on the OS scheduler). If a process decides at some point to go through a lot of processing, it will increase its usage on, say memory and cpu, possibly starving the other processes running on the same host. This might have an impact on these other processes, which might stop meeting their service level objectives. Conversely, the application requiring more resources might fail absorbing its peak of activity, if the other applications running on the host are themselves in a phase where they need additional resources.
@@ -12,14 +20,14 @@ Several strategies can be used to limit the impact or probability of this happen
 
 One aspect that has worked well with traditional workload is that it is static: it is either installed on the host, or not. Obviously, usage can be dynamic, but new workload does not appear suddenly. It is the result of provisioning. This makes it somehow more manageable and predictable than if workloads came and left as it pleased.
 
-But one fundamental characteristic of running workload on bare metal is that unused resources (such as memory and CPU) get lost. As the industry shifted to virtualization, people quickly realized that beside agility, running workload on VMs provided a way to not waste those resources through overprovisioning. However There are 2 challenges with this:
+But one fundamental characteristic of running workload on bare metal is that unused resources (such as memory and CPU) get lost. As the industry shifted to virtualization, people quickly realized that beside agility, running workload on VMs provided a way to not waste those resources through overprovisioning. However there are 2 challenges with this:
 
 * The virtualization service provider may not know the type of workload that is going to run on its ESX. As a result it will be difficult for him to figure out if he can be agressive on the overcommitting ratio or should be conservative.
 * The VM owner has an expectation on resources given by the provider, and is not necessarily aware of the use, the level or even the impact of the overcommitting ratio configured on the virtualization cluster that its VM is running on.
 
 The only guarantee that virtualization service providers will offer is that VMs will not be able to go over the number of vCPU it is configured for. But unless there is a 1:1 ratio, it is not guaranteed to always be able to use of all these vCPUs at any point in time (this will depend on the behavior of the other VMs sharing the same underlying physical host).
 
-Of course VM owners and providers are encouraged to collaborate, to make sure there is a good mutual understanding. However, the expectation of the VM owner on one side, and partial workload knowledge for the provider on the other, will end up usually in conservative choices, such as a low overcommitting ratio. As a result, resources may stay idle, leading to inefficiencies, most likely resulting in suboptimal investements (e.g. paying for cores that you don't use).
+Of course VM owners and providers are encouraged to collaborate, to make sure there is a good mutual understanding. However, the expectation of the VM owner on one side, and partial workload knowledge for the provider on the other, will end up usually in conservative choices, such as a low overcommitting ratio. As a result, resources may stay idle, leading to inefficiencies, most likely resulting in suboptimal investments (e.g. paying for cores that you don't use).
 
 Still, overcommitting at the virtualization layer should be an implementation detail, whose responsibility lies into the hands of the infrastructure team, which will treat its cluster as a whole, trying to maximize efficiency of resources, to lower the cost of the vcpus, but with a primary focus on making available the requested resources (i.e. near-guaranteed resources). The corollary, is that virtualization overcommit should not be used as a substitute to proper capacity management at the application level.
 
@@ -27,7 +35,7 @@ Still, overcommitting at the virtualization layer should be an implementation de
 
 Traditional workload offer little protection in terms of resource access, or ability to limit noisy neighbors. Container technology was introduced more than 10 years ago, and offered significant improvements by exposing some features available in linux cgroups.
 
-Containers offer the added ability of configuring a resource access and limit options: `-m` in for memory and `--cpus`, `--cpu-period`, `--cpu-quota` and `--cpu-shares` for cpu.
+Containers offer the added ability of configuring a resource access and limit options: `-m` for memory and `--cpus`, `--cpu-period`, `--cpu-quota` and `--cpu-shares` for cpu.
 
 The `-m` memory parameter is a limit that the container cannot go over. Since memory is not a compressible resource, if the container tries to go over, it will go OOM and get killed.
 
@@ -108,7 +116,7 @@ In terms of millicores, the allocation is:
 * `container_150`: `81/200*2000 = 810m`
 * `container_450`: `91/200*2000 = 910m`
 
-The first thing we see is that `container_300` is effectively limitied to roughly `900m`. But where do the limits come from for the 2 other containers?
+The first thing we see is that `container_300` is effectively limited to roughly `900m`. But where do the limits come from for the 2 other containers?
 
 When `container_300` reaches its limit, the other containers had received:
 
@@ -183,7 +191,7 @@ There are 2 consequences:
 * The container gets more guaranteed resources than it thinks.
 * The container are not treated equally with respect to allocation when they go above their request.
 
-Let's take a 2 cores hosts running 1 container with 300 millicores request, and another one with 600 millicores. As we have seen they will respectively get 307 (1/3 of total shares) and 614 (2/3 of total shares) shares. If some contention arises, the firt container will be guaranteed 1/3 of 2 cores: 667 millicores. The 2nd one will receive 1333 millicores, far more than what was requested. As the host is filling up with containers, the requests and the shares will look more and more alike. Let's say we are running a 3rd container with 1100 millicores request, filling up our 2-cores host. Then the shares for the 3 containers will be `307/614/1126` for a total of `2047` shares, and the guaranteed amount of cpu will be `300/600/1100`.
+Let's take a 2 cores hosts running 1 container with 300 millicores request, and another one with 600 millicores. As we have seen they will respectively get 307 (1/3 of total shares) and 614 (2/3 of total shares) shares. If some contention arises, the first container will be guaranteed 1/3 of 2 cores: 667 millicores. The 2nd one will receive 1333 millicores, far more than what was requested. As the host is filling up with containers, the requests and the shares will look more and more alike. Let's say we are running a 3rd container with 1100 millicores request, filling up our 2-cores host. Then the shares for the 3 containers will be `307/614/1126` for a total of `2047` shares, and the guaranteed amount of cpu will be `300/600/1100`.
 
 If the sum of requests of all pods is equal to the exact host capacity, and all pods are asking to consume their requests or more, they will all get exactly their requests in millicores. In all other situations they will get more than their requests, which will happen actually most of the time.
 
@@ -201,7 +209,7 @@ As a result, it is recommended to:
 
 It is important to understand that Resource availability is dependent on all processes defining appropriate requests, not just one good citizen. It is not enough for a particular process to define appropriate values; all workloads need to play nice:
 
-* Under-evaluating requests, will lead to poor placement decisions, and resource availability lower than requested, plus non fair access to the extra capacity, which will be distributed to high requestor in a proportional manner during bursts.
+* Under-evaluating requests, will lead to poor placement decisions, and resource availability lower than requested, plus non fair access to the extra capacity, which will be distributed to high requestors in a proportional manner during bursts.
 * Over-evaluating requests (setting requests above actual usage) will lead to under-scheduled nodes and low resource efficiency.
 
 # Kubernetes Quality of Service Classes (QoS)
@@ -252,7 +260,7 @@ Another drawback of this approach is cluster fragmentation when nodes need to be
 
 # Assessing resource requirements
 
-A key aspect of working with Kubernetes compared to traditional workload is specifically the ability to describe resource requirements, which allow to make better informed decisions in terms of placement. Without it, you can still run in Kubernetes, but you are missing a lot of its value.
+A key aspect of working with Kubernetes compared to traditional workload is specifically the ability to describe resource requirements, which allow making better informed decisions in terms of placement. Without it, you can still run in Kubernetes, but you are missing a lot of its value.
 
 What are the resource requirements for your application?
 
@@ -291,10 +299,6 @@ Tuning is about finding the sweet spot between workload resource availability (h
 Research show that even a low percentile (such as 75%) guarantees desired access to resource with a very high probability on typical workload (> 95%), even when the desired level is well above the configured requests.
 
 
-
-
-
-
 # References
 
 [1] [Kubernetes Resources Management – QoS, Quota, and LimitRange](https://www.cncf.io/blog/2020/06/10/kubernetes-resources-management-qos-quota-and-limitrangeb/)
@@ -314,7 +318,6 @@ Kubernetes with VMware Tanzu](https://www.vmware.com/content/dam/digitalmarketin
 
 [Release memory back to the OS with Java 11](https://thomas.preissler.me/blog/2021/05/02/release-memory-back-to-the-os-with-java-11.html)
 
-
 [Understanding resource limits in kubernetes: cpu time](https://medium.com/@betz.mark/understanding-resource-limits-in-kubernetes-cpu-time-9eff74d3161b)
 
 [Node-pressure Eviction](https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/)
@@ -328,3 +331,5 @@ Kubernetes with VMware Tanzu](https://www.vmware.com/content/dam/digitalmarketin
 [Running Kubernetes and the dashboard with Docker Desktop](https://andrewlock.net/running-kubernetes-and-the-dashboard-with-docker-desktop/)
 
 [Getting Started with Cloud Cost Optimization](https://harness.io/blog/cloud-cost-management/cloud-cost-optimization/)
+
+[VERTICAL POD AUTOSCALING: THE DEFINITIVE GUIDE](https://povilasv.me/vertical-pod-autoscaling-the-definitive-guide/)
