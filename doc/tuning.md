@@ -2,7 +2,7 @@ This article aims providing a good understanding of container resource sizing in
 
 This is a "Work in Progress". Important topics have yet to be covered, such as:
 
-* Recommendation engines: [Vertical Pod Autoscaler (VPA)](https://github.com/kubernetes/autoscaler/tree/master/vertical-pod-autoscaler), [Harness](https://docs.harness.io/article/ikxjmkqi03-recommendations)
+* Recommendation engines: [Vertical Pod Autoscaler](https://github.com/kubernetes/autoscaler/tree/master/vertical-pod-autoscaler) (VPA), [Harness](https://docs.harness.io/article/ikxjmkqi03-recommendations)
 * [Memory swap](https://kubernetes.io/blog/2021/08/09/run-nodes-with-swap-alpha/) in Kubernetes 1.22
 * Scaling out: How to mix Horizontal Pod Autoscaling with VPA
 
