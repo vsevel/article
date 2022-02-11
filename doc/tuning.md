@@ -6,6 +6,8 @@ This is a "Work in Progress". Important topics have yet to be covered, such as:
 * [Memory swap](https://kubernetes.io/blog/2021/08/09/run-nodes-with-swap-alpha/) in Kubernetes 1.22
 * Scaling out: How to mix Horizontal Pod Autoscaling with VPA
 
+Numbers will be provided also coming out of tests done using a "Completely Fair Scheduler" [simulator](https://github.com/vsevel/pod-cpu-tuning/tree/work/src/test/java/org/vince/stress), showing the impact of using different strategies for calculating the requests in a K8s cluster.
+
 # From bare metal to virtualization
 
 Running multiple workloads on bare metal requires to share resources between the different processes on a given host. Processes are not protected against each other (for CPU, it depends on the OS scheduler). If a process decides at some point to go through a lot of processing, it will increase its usage on, say memory and cpu, possibly starving the other processes running on the same host. This might have an impact on these other processes, which might stop meeting their service level objectives. Conversely, the application requiring more resources might fail absorbing its peak of activity, if the other applications running on the host are themselves in a phase where they need additional resources.
